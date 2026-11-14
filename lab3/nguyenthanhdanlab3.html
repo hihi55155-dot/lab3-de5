@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hệ Thống Giám Sát & Phát Hiện Té Ngã - ESP32 FreeRTOS & MPU6050</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+  <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0f172a;
+      color: #f8fafc;
+    }
+    .metric-card {
+      background: rgba(30, 41, 59, 0.85);
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      border-radius: 0.875rem;
+      transition: all 0.2s ease;
+    }
+    .metric-card:hover {
+      border-color: rgba(56, 189, 248, 0.4);
+    }
+    .pulse-danger {
+      animation: pulseRed 1.2s infinite;
+    }
+    @keyframes pulseRed {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      50% { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); }
+    }
+  </style>
+</head>
+<body class="min-h-screen p-4 md:p-6">
+  <div class="max-w-7xl mx-auto space-y-6">
+
+    <!-- HEADER & TRẠNG THÁI KẾT NỐI BROKER -->
+    <header class="metric-card p-4 md:p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+      <div class="flex items-start md:items-center gap-3">
+        <div class="w-11 h-11 rounded-xl bg-sky-500/20 border border-sky-400/40 flex items-center justify-center text-sky-400 shrink-0">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-lg md:text-xl font-bold text-white tracking-tight">
+            Hệ Thống Giám Sát &amp; Phát Hiện Té Ngã (ESP32 FreeRTOS - MPU6050)
+          </h1>
+          <p class="text-xs md:text-sm text-slate-400">
+            MQTT Broker: <span class="text-sky-400 font-mono">broker.emqx.io</span> | Topic: <span class="text-emerald-400 font-mono">emqx/utc2026/fall/telemetry</span>
+          </p>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2.5">
+        <span id="mqtt-status-badge" class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+          <span id="mqtt-status-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+          <span id="mqtt-status-text">Đang kết nối MQTT...</span>
+        </span>
+
+        <button id="btn-sim-normal" type="button" class="px-3.5 py-2 rounded-lg text-xs font-semibold bg-emerald-600/80 hover:bg-emerald-600 text-white border border-emerald-500 transition shadow">
+          Thử mẫu Bình thường
+        </button>
+        <button id="btn-sim-fall" type="button" class="px-3.5 py-2 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white border border-rose-400 transition shadow">
+          Giả lập Té ngã
+        </button>
+      </div>
+    </header>
+
+    <!-- BANNER TRẠNG THÁI TÉ NGÃ -->
+    <div id="fall-banner" class="fall-status-banner rounded-xl p-4 border border-emerald-500/40 bg-emerald-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all">
+      <div class="flex items-center gap-3">
+        <div id="fall-icon-box" class="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-lg shrink-0">
+          ✓
+        </div>
+        <div>
+          <div class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Trạng thái cơ thể người đeo</div>
+          <div id="fall-state-label" class="fall-state-value text-base md:text-lg font-bold text-emerald-400">
+            TRẠNG THÁI BÌNH THƯỜNG (AN TOÀN)
+          </div>
+        </div>
+      </div>
+      <div class="text-xs text-slate-300 font-mono">
+        Ngưỡng cảnh báo: <span class="text-sky-300">SVM &ge; 2.2g</span> hoặc <span class="text-amber-300">|Góc nghiêng| &ge; 60&deg;</span>
+      </div>
+    </div>
+
+    <!-- CÁC THẺ HTML HIỂN THỊ DỮ LIỆU GIA TỐC VÀ GÓC NGHIÊNG DẠNG SỐ (SỬ DỤNG CLASS THEO ĐỀ BÀI) -->
+    <section>
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">
+          Thông số cảm biến MPU6050 thời gian thực (Thẻ HTML Class)
+        </h2>
+        <span id="last-update-time" class="text-xs text-slate-400 font-mono">Cập nhật: --:--:--</span>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5">
+        <!-- Gia tốc trục X -->
+        <div class="metric-card sensor-card accel-x-card p-4">
+          <div class="text-xs text-slate-400 font-medium">Gia tốc trục X (a<sub>x</sub>)</div>
+          <div class="mt-2 flex items-baseline gap-1">
+            <span id="val-ax" class="accel-value accel-x-value text-2xl font-bold text-sky-400 font-mono">0.02</span>
+            <span class="text-xs text-slate-400">g</span>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">class="accel-x-value"</div>
+        </div>
+
+        <!-- Gia tốc trục Y -->
+        <div class="metric-card sensor-card accel-y-card p-4">
+          <div class="text-xs text-slate-400 font-medium">Gia tốc trục Y (a<sub>y</sub>)</div>
+          <div class="mt-2 flex items-baseline gap-1">
+            <span id="val-ay" class="accel-value accel-y-value text-2xl font-bold text-indigo-400 font-mono">-0.01</span>
+            <span class="text-xs text-slate-400">g</span>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">class="accel-y-value"</div>
+        </div>
+
+        <!-- Gia tốc trục Z -->
+        <div class="metric-card sensor-card accel-z-card p-4">
+          <div class="text-xs text-slate-400 font-medium">Gia tốc trục Z (a<sub>z</sub>)</div>
+          <div class="mt-2 flex items-baseline gap-1">
+            <span id="val-az" class="accel-value accel-z-value text-2xl font-bold text-teal-400 font-mono">0.98</span>
+            <span class="text-xs text-slate-400">g</span>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">class="accel-z-value"</div>
+        </div>
+
+        <!-- Gia tốc tổng hợp SVM -->
+        <div class="metric-card sensor-card accel-total-card p-4 border-sky-500/30">
+          <div class="text-xs text-sky-300 font-semibold">Gia tốc tổng (SVM)</div>
+          <div class="mt-2 flex items-baseline gap-1">
+            <span id="val-svm" class="accel-value accel-svm-value text-2xl font-bold text-white font-mono">0.98</span>
+            <span class="text-xs text-sky-300">g</span>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">class="accel-svm-value"</div>
+        </div>
+
+        <!-- Góc nghiêng Roll -->
+        <div class="metric-card sensor-card angle-roll-card p-4">
+          <div class="text-xs text-amber-300 font-medium">Góc nghiêng Roll (&phi;)</div>
+          <div class="mt-2 flex items-baseline gap-1">
+            <span id="val-roll" class="angle-value angle-roll-value text-2xl font-bold text-amber-400 font-mono">-0.6</span>
+            <span class="text-xs text-amber-300">&deg;</span>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">class="angle-roll-value"</div>
+        </div>
+
+        <!-- Góc nghiêng Pitch -->
+        <div class="metric-card sensor-card angle-pitch-card p-4">
+          <div class="text-xs text-purple-300 font-medium">Góc nghiêng Pitch (&theta;)</div>
+          <div class="mt-2 flex items-baseline gap-1">
+            <span id="val-pitch" class="angle-value angle-pitch-value text-2xl font-bold text-purple-400 font-mono">-1.2</span>
+            <span class="text-xs text-purple-300">&deg;</span>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">class="angle-pitch-value"</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- BẢNG ĐIỀU KHIỂN CƠ CẤU CHẤP HÀNH (CHẾ ĐỘ MANUAL - 2 NÚT BUTTON) -->
+    <section class="metric-card p-5">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-700/70">
+        <div>
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            Điều Khiển Cơ Cấu Chấp Hành (Đèn LED &amp; Loa Cảnh Báo)
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Sử dụng thẻ <code class="text-sky-300">&lt;button&gt;</code> gửi lệnh JSON qua MQTT Topic <code class="text-emerald-300">emqx/utc2026/fall/control</code> xuống ESP32.
+          </p>
+        </div>
+
+        <!-- Chuyển đổi chế độ Auto / Manual -->
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-slate-300 font-medium">Chế độ hoạt động:</span>
+          <button id="btn-mode-toggle" type="button" class="mode-control-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-sky-600 hover:bg-sky-500 text-white transition">
+            Chế độ: TỰ ĐỘNG (AUTO)
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+        <!-- Nút Button 1: Điều khiển trạng thái LED cảnh báo -->
+        <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-700/80 flex items-center justify-between gap-4">
+          <div class="flex items-center gap-3.5">
+            <div id="led-indicator" class="w-12 h-12 rounded-xl bg-slate-800 border border-slate-600 flex items-center justify-center text-slate-400 transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+              </svg>
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-white">Đèn LED Cảnh Báo (GPIO 26)</div>
+              <div class="text-xs text-slate-400 mt-0.5">
+                Trạng thái hiện tại:
+                <span id="led-state-text" class="led-status-label font-bold text-slate-300">ĐANG TẮT (OFF)</span>
+              </div>
+            </div>
+          </div>
+
+          <button id="btn-toggle-led" type="button" class="btn-control-led px-4 py-2.5 rounded-xl font-semibold text-xs sm:text-sm bg-rose-600 hover:bg-rose-500 text-white shadow transition shrink-0">
+            Bật / Tắt LED (Manual)
+          </button>
+        </div>
+
+        <!-- Nút Button 2: Điều khiển trạng thái Loa cảnh báo -->
+        <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-700/80 flex items-center justify-between gap-4">
+          <div class="flex items-center gap-3.5">
+            <div id="buzzer-indicator" class="w-12 h-12 rounded-xl bg-slate-800 border border-slate-600 flex items-center justify-center text-slate-400 transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+              </svg>
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-white">Loa / Còi Cảnh Báo (GPIO 27)</div>
+              <div class="text-xs text-slate-400 mt-0.5">
+                Trạng thái hiện tại:
+                <span id="buzzer-state-text" class="buzzer-status-label font-bold text-slate-300">ĐANG TẮT (OFF)</span>
+              </div>
+            </div>
+          </div>
+
+          <button id="btn-toggle-buzzer" type="button" class="btn-control-buzzer px-4 py-2.5 rounded-xl font-semibold text-xs sm:text-sm bg-amber-600 hover:bg-amber-500 text-white shadow transition shrink-0">
+            Bật / Tắt Loa (Manual)
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- THANH TRƯỢT GIẢ LẬP TRỰC TIẾP GIA TỐC & GÓC NGHIÊNG TRÊN WEB -->
+    <section class="metric-card p-5 border-sky-500/30">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+        <div>
+          <h2 class="text-sm font-bold text-sky-400 uppercase tracking-wider">
+            Bộ Giả Lập Cảm Biến MPU6050 Trực Tiếp Trên Web (Tương tác thời gian thực)
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Kéo thanh trượt Gia tốc hoặc Góc nghiêng vượt ngưỡng (<code class="text-rose-400">SVM &ge; 2.2g</code> hoặc <code class="text-amber-300">|Góc| &ge; 60&deg;</code>) hoặc bấm nút <b>Giả lập Té ngã</b> để kích hoạt báo động ngay lập tức mà không bị gói tin Wokwi ghi đè.
+          </p>
+        </div>
+        <span id="sim-lock-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700 shrink-0">
+          Nguồn dữ liệu: Cảm biến MQTT / Tự động
+        </span>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800">
+          <div class="flex justify-between text-xs font-medium mb-2">
+            <span class="text-slate-300">Gia tốc trục X (a<sub>x</sub>):</span>
+            <span id="slider-ax-label" class="font-mono text-sky-400 font-bold">0.02 g</span>
+          </div>
+          <input id="slider-ax" type="range" min="-3.0" max="3.0" step="0.05" value="0.02" class="w-full accent-sky-400 cursor-pointer" />
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800">
+          <div class="flex justify-between text-xs font-medium mb-2">
+            <span class="text-slate-300">Góc nghiêng Roll (&phi;):</span>
+            <span id="slider-roll-label" class="font-mono text-amber-400 font-bold">-0.6&deg;</span>
+          </div>
+          <input id="slider-roll" type="range" min="-90" max="90" step="1" value="-1" class="w-full accent-amber-400 cursor-pointer" />
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800">
+          <div class="flex justify-between text-xs font-medium mb-2">
+            <span class="text-slate-300">Góc nghiêng Pitch (&theta;):</span>
+            <span id="slider-pitch-label" class="font-mono text-purple-400 font-bold">-1.2&deg;</span>
+          </div>
+          <input id="slider-pitch" type="range" min="-90" max="90" step="1" value="-1" class="w-full accent-purple-400 cursor-pointer" />
+        </div>
+      </div>
+    </section>
+
+    <!-- 2 BIỂU ĐỒ CẬP NHẬT DỮ LIỆU GIA TỐC VÀ GÓC NGHIÊNG TRỰC TIẾP THEO THỜI GIAN THỰC -->
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <!-- Biểu đồ 1: Gia tốc (g) -->
+      <div class="metric-card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h3 class="text-sm font-bold text-white">Biểu Đồ 1: Gia Tốc Thời Gian Thực (Real-time Acceleration)</h3>
+            <p class="text-xs text-slate-400">Đơn vị: g (1g &approx; 9.81 m/s&sup2;) — Ngưỡng té ngã: &ge; 2.2g</p>
+          </div>
+          <span class="px-2.5 py-1 rounded text-[11px] font-mono bg-sky-500/15 text-sky-300">ax, ay, az, SVM</span>
+        </div>
+        <div class="relative h-72">
+          <canvas id="accelChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Biểu đồ 2: Góc nghiêng (độ) -->
+      <div class="metric-card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h3 class="text-sm font-bold text-white">Biểu Đồ 2: Góc Nghiêng Thời Gian Thực (Real-time Tilt Angle)</h3>
+            <p class="text-xs text-slate-400">Đơn vị: Độ (&deg;) — Ngưỡng té ngã: |Roll| hoặc |Pitch| &ge; 60&deg;</p>
+          </div>
+          <span class="px-2.5 py-1 rounded text-[11px] font-mono bg-amber-500/15 text-amber-300">Roll (&phi;), Pitch (&theta;)</span>
+        </div>
+        <div class="relative h-72">
+          <canvas id="angleChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- NHẬT KÝ GÓI TIN MQTT & KIẾN TRÚC FREERTOS -->
+    <section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div class="metric-card p-5 lg:col-span-2">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-bold text-white">Nhật ký gói tin MQTT (Serial / Broker Log)</h3>
+          <button id="btn-clear-log" type="button" class="text-xs text-slate-400 hover:text-white transition">Xóa log</button>
+        </div>
+        <div id="mqtt-log-box" class="h-36 overflow-y-auto bg-slate-950/80 border border-slate-800 rounded-lg p-3 font-mono text-xs text-slate-300 space-y-1">
+          <div class="text-slate-400">[System] Khởi tạo giao diện Web Giám sát phát hiện té ngã...</div>
+        </div>
+      </div>
+
+      <div class="metric-card p-5 text-xs space-y-2.5 text-slate-300">
+        <h3 class="text-sm font-bold text-white">Kiến trúc đa nhiệm FreeRTOS trên ESP32</h3>
+        <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+          <div class="font-semibold text-sky-400">Core 0 — Task truyền data</div>
+          <p class="text-slate-400 mt-0.5">Kết nối WiFi, nhận dữ liệu từ hàng đợi <code class="text-slate-200">data Queue</code> và publish lên MQTT Broker.</p>
+        </div>
+        <div class="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800">
+          <div class="font-semibold text-emerald-400">Core 1 — Task đọc data &amp; Task cảnh báo</div>
+          <p class="text-slate-400 mt-0.5">Đọc MPU6050, xuất Serial, đẩy vào <code class="text-slate-200">data Queue</code> &amp; <code class="text-slate-200">data Alert</code> để kích hoạt Còi/Đèn.</p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <script>
+    // =========================================================================
+    // 1. CẤU HÌNH MQTT OVER WEBSOCKETS (KẾT NỐI TRỰC TIẾP VỚI WOKWI QUA EMQX)
+    // =========================================================================
+    const MQTT_BROKER_URL  = "wss://broker.emqx.io:8084/mqtt";
+    const TOPIC_TELEMETRY  = "emqx/utc2026/fall/telemetry";
+    const TOPIC_CONTROL    = "emqx/utc2026/fall/control";
+    const MAX_CHART_POINTS = 20;
+
+    let appState = {
+      mode: "auto",   // "auto" hoặc "manual"
+      led: false,
+      buzzer: false,
+      fall: false,
+      simActive: false // Khi bật giả lập té ngã trên Web, khóa không cho gói tin bình thường ghi đè
+    };
+
+    let simIntervalId = null;
+
+    // =========================================================================
+    // 2. KHỞI TẠO 2 BIỂU ĐỒ THỜI GIAN THỰC (CHART.JS)
+    // =========================================================================
+    const accelCtx = document.getElementById("accelChart").getContext("2d");
+    const accelChart = new Chart(accelCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: "Tổng hợp SVM (g)",
+            data: [],
+            borderColor: "#f8fafc",
+            backgroundColor: "rgba(248, 250, 252, 0.1)",
+            borderWidth: 2.5,
+            tension: 0.3,
+            pointRadius: 2
+          },
+          {
+            label: "Trục X (g)",
+            data: [],
+            borderColor: "#38bdf8",
+            borderWidth: 1.5,
+            tension: 0.3,
+            pointRadius: 1.5
+          },
+          {
+            label: "Trục Y (g)",
+            data: [],
+            borderColor: "#818cf8",
+            borderWidth: 1.5,
+            tension: 0.3,
+            pointRadius: 1.5
+          },
+          {
+            label: "Trục Z (g)",
+            data: [],
+            borderColor: "#2dd4bf",
+            borderWidth: 1.5,
+            tension: 0.3,
+            pointRadius: 1.5
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 200 },
+        scales: {
+          x: {
+            ticks: { color: "#94a3b8", maxTicksLimit: 8 },
+            grid: { color: "rgba(148, 163, 184, 0.1)" }
+          },
+          y: {
+            suggestedMin: -2,
+            suggestedMax: 3.5,
+            ticks: { color: "#94a3b8" },
+            grid: { color: "rgba(148, 163, 184, 0.1)" }
+          }
+        },
+        plugins: {
+          legend: { labels: { color: "#e2e8f0", boxWidth: 12, font: { size: 11 } } }
+        }
+      }
+    });
+
+    const angleCtx = document.getElementById("angleChart").getContext("2d");
+    const angleChart = new Chart(angleCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: "Góc Roll (°)",
+            data: [],
+            borderColor: "#fbbf24",
+            backgroundColor: "rgba(251, 191, 36, 0.12)",
+            borderWidth: 2,
+            tension: 0.3,
+            fill: true,
+            pointRadius: 2
+          },
+          {
+            label: "Góc Pitch (°)",
+            data: [],
+            borderColor: "#c084fc",
+            backgroundColor: "rgba(192, 132, 252, 0.12)",
+            borderWidth: 2,
+            tension: 0.3,
+            fill: true,
+            pointRadius: 2
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 200 },
+        scales: {
+          x: {
+            ticks: { color: "#94a3b8", maxTicksLimit: 8 },
+            grid: { color: "rgba(148, 163, 184, 0.1)" }
+          },
+          y: {
+            suggestedMin: -90,
+            suggestedMax: 90,
+            ticks: { color: "#94a3b8" },
+            grid: { color: "rgba(148, 163, 184, 0.1)" }
+          }
+        },
+        plugins: {
+          legend: { labels: { color: "#e2e8f0", boxWidth: 12, font: { size: 11 } } }
+        }
+      }
+    });
+
+    // =========================================================================
+    // 3. HÀM CẬP NHẬT GIAO DIỆN SỐ, BANNER CẢNH BÁO & BIỂU ĐỒ
+    // =========================================================================
+    function appendLog(text, isAlert = false) {
+      const box = document.getElementById("mqtt-log-box");
+      const line = document.createElement("div");
+      const now = new Date().toLocaleTimeString("vi-VN");
+      line.className = isAlert ? "text-rose-400 font-semibold" : "text-slate-300";
+      line.textContent = `[${now}] ${text}`;
+      box.prepend(line);
+    }
+
+    function renderActuatorUI() {
+      const modeBtn = document.getElementById("btn-mode-toggle");
+      if (appState.mode === "manual") {
+        modeBtn.textContent = "Chế độ: THỦ CÔNG (MANUAL)";
+        modeBtn.className = "mode-control-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white transition";
+      } else {
+        modeBtn.textContent = "Chế độ: TỰ ĐỘNG (AUTO)";
+        modeBtn.className = "mode-control-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-sky-600 hover:bg-sky-500 text-white transition";
+      }
+
+      const ledIndicator = document.getElementById("led-indicator");
+      const ledText = document.getElementById("led-state-text");
+      if (appState.led) {
+        ledIndicator.className = "w-12 h-12 rounded-xl bg-rose-500/20 border border-rose-500 text-rose-400 flex items-center justify-center pulse-danger transition-all";
+        ledText.textContent = "ĐANG BẬT (ON)";
+        ledText.className = "led-status-label font-bold text-rose-400";
+      } else {
+        ledIndicator.className = "w-12 h-12 rounded-xl bg-slate-800 border border-slate-600 text-slate-400 flex items-center justify-center transition-all";
+        ledText.textContent = "ĐANG TẮT (OFF)";
+        ledText.className = "led-status-label font-bold text-slate-400";
+      }
+
+      const buzzerIndicator = document.getElementById("buzzer-indicator");
+      const buzzerText = document.getElementById("buzzer-state-text");
+      if (appState.buzzer) {
+        buzzerIndicator.className = "w-12 h-12 rounded-xl bg-amber-500/20 border border-amber-500 text-amber-400 flex items-center justify-center pulse-danger transition-all";
+        buzzerText.textContent = "ĐANG KÊU (ON)";
+        buzzerText.className = "buzzer-status-label font-bold text-amber-400";
+      } else {
+        buzzerIndicator.className = "w-12 h-12 rounded-xl bg-slate-800 border border-slate-600 text-slate-400 flex items-center justify-center transition-all";
+        buzzerText.textContent = "ĐANG TẮT (OFF)";
+        buzzerText.className = "buzzer-status-label font-bold text-slate-400";
+      }
+    }
+
+    function updateDashboard(data) {
+      const ax = Number(data.ax ?? 0);
+      const ay = Number(data.ay ?? 0);
+      const az = Number(data.az ?? 0);
+      const svm = Number(data.totalAccel ?? Math.sqrt(ax * ax + ay * ay + az * az));
+      const roll = Number(data.roll ?? 0);
+      const pitch = Number(data.pitch ?? 0);
+      const isFall = Boolean(data.fall) || svm >= 2.2 || svm <= 0.4 || Math.abs(roll) >= 60 || Math.abs(pitch) >= 60;
+
+      // Cập nhật các thẻ HTML hiển thị dạng số (theo class đề bài yêu cầu)
+      document.querySelector(".accel-x-value").textContent = ax.toFixed(2);
+      document.querySelector(".accel-y-value").textContent = ay.toFixed(2);
+      document.querySelector(".accel-z-value").textContent = az.toFixed(2);
+      document.querySelector(".accel-svm-value").textContent = svm.toFixed(2);
+      document.querySelector(".angle-roll-value").textContent = roll.toFixed(1);
+      document.querySelector(".angle-pitch-value").textContent = pitch.toFixed(1);
+
+      const timeLabel = new Date().toLocaleTimeString("vi-VN");
+      document.getElementById("last-update-time").textContent = `Cập nhật: ${timeLabel}`;
+
+      // Cập nhật Banner trạng thái té ngã
+      const banner = document.getElementById("fall-banner");
+      const iconBox = document.getElementById("fall-icon-box");
+      const stateLabel = document.getElementById("fall-state-label");
+
+      if (isFall) {
+        banner.className = "fall-status-banner rounded-xl p-4 border border-rose-500 bg-rose-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 pulse-danger transition-all";
+        iconBox.className = "w-10 h-10 rounded-full bg-rose-500 text-white flex items-center justify-center font-bold text-lg shrink-0";
+        iconBox.textContent = "!";
+        stateLabel.className = "fall-state-value text-base md:text-lg font-bold text-rose-400";
+        stateLabel.textContent = "CẢNH BÁO: PHÁT HIỆN TÉ NGÃ ĐỘT NGỘT!";
+      } else {
+        banner.className = "fall-status-banner rounded-xl p-4 border border-emerald-500/40 bg-emerald-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all";
+        iconBox.className = "w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-lg shrink-0";
+        iconBox.textContent = "✓";
+        stateLabel.className = "fall-state-value text-base md:text-lg font-bold text-emerald-400";
+        stateLabel.textContent = "TRẠNG THÁI BÌNH THƯỜNG (AN TOÀN)";
+      }
+
+      if (typeof data.mode === "string") appState.mode = data.mode;
+      if (appState.mode === "auto") {
+        appState.led = isFall;
+        appState.buzzer = isFall;
+      } else {
+        if (typeof data.led === "boolean") appState.led = data.led;
+        if (typeof data.buzzer === "boolean") appState.buzzer = data.buzzer;
+      }
+      renderActuatorUI();
+
+      // Đẩy dữ liệu vào Biểu đồ 1 (Gia tốc)
+      accelChart.data.labels.push(timeLabel);
+      accelChart.data.datasets[0].data.push(svm);
+      accelChart.data.datasets[1].data.push(ax);
+      accelChart.data.datasets[2].data.push(ay);
+      accelChart.data.datasets[3].data.push(az);
+      if (accelChart.data.labels.length > MAX_CHART_POINTS) {
+        accelChart.data.labels.shift();
+        accelChart.data.datasets.forEach(ds => ds.data.shift());
+      }
+      accelChart.update();
+
+      // Đẩy dữ liệu vào Biểu đồ 2 (Góc nghiêng)
+      angleChart.data.labels.push(timeLabel);
+      angleChart.data.datasets[0].data.push(roll);
+      angleChart.data.datasets[1].data.push(pitch);
+      if (angleChart.data.labels.length > MAX_CHART_POINTS) {
+        angleChart.data.labels.shift();
+        angleChart.data.datasets.forEach(ds => ds.data.shift());
+      }
+      angleChart.update();
+    }
+
+    // =========================================================================
+    // 4. KẾT NỐI MQTT CLIENT & ĐỒNG BỘ 2 CHIỀU VỚI WOKWI
+    // =========================================================================
+    let mqttClient = null;
+
+    function initMQTT() {
+      try {
+        const clientId = "WebDashboard-UTC-" + Math.floor(Math.random() * 100000);
+        mqttClient = mqtt.connect(MQTT_BROKER_URL, {
+          clientId: clientId,
+          clean: true,
+          connectTimeout: 5000,
+          reconnectPeriod: 3000
+        });
+
+        mqttClient.on("connect", () => {
+          const badge = document.getElementById("mqtt-status-badge");
+          const dot = document.getElementById("mqtt-status-dot");
+          const txt = document.getElementById("mqtt-status-text");
+          badge.className = "inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+          dot.className = "w-2 h-2 rounded-full bg-emerald-400";
+          txt.textContent = "Đã kết nối Broker (WSS)";
+
+          mqttClient.subscribe(TOPIC_TELEMETRY, (err) => {
+            if (!err) {
+              appendLog(`Đã đăng ký nhận dữ liệu từ Topic: ${TOPIC_TELEMETRY}`);
+            }
+          });
+        });
+
+        mqttClient.on("message", (topic, message) => {
+          if (topic === TOPIC_TELEMETRY) {
+            try {
+              const payload = JSON.parse(message.toString());
+              // Nếu đang bật chế độ Giả lập Té ngã trên Web mà gói tin từ Wokwi báo fall=false (do chưa cập nhật kịp), bỏ qua không cho ghi đè
+              if (appState.simActive && !payload.fall) {
+                return;
+              }
+              updateDashboard(payload);
+              appendLog(
+                `[RX] SVM=${Number(payload.totalAccel).toFixed(2)}g | Roll=${Number(payload.roll).toFixed(1)}° | Pitch=${Number(payload.pitch).toFixed(1)}° | Fall=${payload.fall ? "YES" : "NO"}`,
+                Boolean(payload.fall)
+              );
+            } catch (e) {
+              appendLog("Lỗi phân tích cú pháp JSON: " + e.message, true);
+            }
+          }
+        });
+
+        mqttClient.on("error", () => {
+          document.getElementById("mqtt-status-text").textContent = "Chế độ Mô phỏng Cục bộ (Offline)";
+        });
+      } catch (err) {
+        appendLog("Không thể khởi tạo WebSocket MQTT: " + err.message);
+      }
+    }
+
+    function sendControlCommand(payloadObj) {
+      const jsonStr = JSON.stringify(payloadObj);
+      if (mqttClient && mqttClient.connected) {
+        mqttClient.publish(TOPIC_CONTROL, jsonStr);
+        appendLog(`[TX -> ${TOPIC_CONTROL}] ${jsonStr}`);
+      } else {
+        appendLog(`[Local Action] ${jsonStr}`);
+      }
+    }
+
+    function stopLocalFallLoop() {
+      if (simIntervalId) {
+        clearInterval(simIntervalId);
+        simIntervalId = null;
+      }
+    }
+
+    // Nút Giả lập Té ngã (Giữ liên tục và đồng bộ xuống cả ESP32 Wokwi)
+    document.getElementById("btn-sim-fall").addEventListener("click", () => {
+      appState.simActive = true;
+      appState.mode = "auto";
+
+      const lockBadge = document.getElementById("sim-lock-badge");
+      lockBadge.textContent = "ĐANG GIẢ LẬP TÉ NGÃ (ĐÃ KHÓA GHI ĐÈ)";
+      lockBadge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/40 shrink-0";
+
+      // Đồng bộ thanh trượt sang ngưỡng té ngã
+      document.getElementById("slider-ax").value = "1.85";
+      document.getElementById("slider-roll").value = "72";
+      document.getElementById("slider-pitch").value = "-64";
+      document.getElementById("slider-ax-label").textContent = "1.85 g";
+      document.getElementById("slider-roll-label").textContent = "72°";
+      document.getElementById("slider-pitch-label").textContent = "-64°";
+
+      // Gửi lệnh xuống ESP32 trên Wokwi để mạch Wokwi cũng hú còi & sáng đèn LED
+      sendControlCommand({ simFall: true, mode: "auto" });
+
+      const pushFallSample = () => {
+        const ax = +(1.80 + Math.random() * 0.15).toFixed(2);
+        const ay = +(1.35 + Math.random() * 0.15).toFixed(2);
+        const az = +(0.30 + Math.random() * 0.10).toFixed(2);
+        const totalAccel = +Math.sqrt(ax * ax + ay * ay + az * az).toFixed(2);
+        const roll = +(71 + Math.random() * 4).toFixed(1);
+        const pitch = +(-62 - Math.random() * 4).toFixed(1);
+
+        const fallSample = {
+          ax, ay, az, totalAccel, roll, pitch,
+          fall: true,
+          mode: appState.mode,
+          led: true,
+          buzzer: true
+        };
+        updateDashboard(fallSample);
+      };
+
+      pushFallSample();
+      stopLocalFallLoop();
+      simIntervalId = setInterval(pushFallSample, 1000);
+      appendLog(">>> ĐÃ BẬT GIẢ LẬP TÉ NGÃ! (SVM >= 2.2g, Góc nghiêng >= 60°, Bật LED & Loa)", true);
+    });
+
+    // Nút Thử mẫu Bình thường
+    document.getElementById("btn-sim-normal").addEventListener("click", () => {
+      appState.simActive = false;
+      stopLocalFallLoop();
+
+      const lockBadge = document.getElementById("sim-lock-badge");
+      lockBadge.textContent = "Nguồn dữ liệu: Cảm biến MQTT / Tự động";
+      lockBadge.className = "px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700 shrink-0";
+
+      document.getElementById("slider-ax").value = "0.02";
+      document.getElementById("slider-roll").value = "-1";
+      document.getElementById("slider-pitch").value = "-1";
+      document.getElementById("slider-ax-label").textContent = "0.02 g";
+      document.getElementById("slider-roll-label").textContent = "-1°";
+      document.getElementById("slider-pitch-label").textContent = "-1°";
+
+      sendControlCommand({ simFall: false, mode: "auto", led: false, buzzer: false });
+
+      const sample = {
+        ax: 0.02,
+        ay: -0.01,
+        az: 0.98,
+        totalAccel: 0.98,
+        roll: -0.6,
+        pitch: -1.2,
+        fall: false,
+        mode: "auto",
+        led: false,
+        buzzer: false
+      };
+      updateDashboard(sample);
+      appendLog("[Reset] Đã đưa hệ thống về trạng thái Bình thường (An toàn).");
+    });
+
+    // Thanh trượt giả lập trực tiếp trên Web
+    function handleSliderChange() {
+      stopLocalFallLoop();
+      appState.simActive = true;
+
+      const ax = parseFloat(document.getElementById("slider-ax").value);
+      const roll = parseFloat(document.getElementById("slider-roll").value);
+      const pitch = parseFloat(document.getElementById("slider-pitch").value);
+      const ay = +(Math.sin(roll * Math.PI / 180) * 0.98).toFixed(2);
+      const az = +(Math.cos(roll * Math.PI / 180) * 0.98).toFixed(2);
+      const svm = +Math.sqrt(ax * ax + ay * ay + az * az).toFixed(2);
+
+      document.getElementById("slider-ax-label").textContent = `${ax.toFixed(2)} g`;
+      document.getElementById("slider-roll-label").textContent = `${roll.toFixed(0)}°`;
+      document.getElementById("slider-pitch-label").textContent = `${pitch.toFixed(0)}°`;
+
+      const isFall = (svm >= 2.2 || svm <= 0.4 || Math.abs(roll) >= 60 || Math.abs(pitch) >= 60);
+
+      const lockBadge = document.getElementById("sim-lock-badge");
+      lockBadge.textContent = isFall ? "ĐANG GIẢ LẬP TÉ NGÃ (THANH TRƯỢT)" : "Đang chỉnh tay trên Web (Đã khóa ghi đè)";
+      lockBadge.className = isFall
+        ? "px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/40 shrink-0"
+        : "px-3 py-1 rounded-full text-xs font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/40 shrink-0";
+
+      updateDashboard({
+        ax, ay, az,
+        totalAccel: svm,
+        roll, pitch,
+        fall: isFall,
+        mode: appState.mode
+      });
+    }
+
+    document.getElementById("slider-ax").addEventListener("input", handleSliderChange);
+    document.getElementById("slider-roll").addEventListener("input", handleSliderChange);
+    document.getElementById("slider-pitch").addEventListener("input", handleSliderChange);
+
+    // Sự kiện cho nút chuyển đổi chế độ Auto / Manual
+    document.getElementById("btn-mode-toggle").addEventListener("click", () => {
+      appState.mode = appState.mode === "auto" ? "manual" : "auto";
+      renderActuatorUI();
+      sendControlCommand({
+        mode: appState.mode,
+        led: appState.led,
+        buzzer: appState.buzzer
+      });
+    });
+
+    // Sự kiện cho Nút Button 1: Điều khiển Đèn LED cảnh báo (chế độ Manual)
+    document.getElementById("btn-toggle-led").addEventListener("click", () => {
+      appState.mode = "manual";
+      appState.led = !appState.led;
+      renderActuatorUI();
+      sendControlCommand({
+        mode: "manual",
+        led: appState.led,
+        buzzer: appState.buzzer
+      });
+    });
+
+    // Sự kiện cho Nút Button 2: Điều khiển Loa cảnh báo (chế độ Manual)
+    document.getElementById("btn-toggle-buzzer").addEventListener("click", () => {
+      appState.mode = "manual";
+      appState.buzzer = !appState.buzzer;
+      renderActuatorUI();
+      sendControlCommand({
+        mode: "manual",
+        led: appState.led,
+        buzzer: appState.buzzer
+      });
+    });
+
+    document.getElementById("btn-clear-log").addEventListener("click", () => {
+      document.getElementById("mqtt-log-box").innerHTML = "";
+    });
+
+    // Khởi tạo dữ liệu mẫu ban đầu
+    window.addEventListener("DOMContentLoaded", () => {
+      const initSamples = [
+        { ax: 0.01, ay: -0.02, az: 0.99, totalAccel: 0.99, roll: -1.1, pitch: -0.6, fall: false },
+        { ax: 0.03, ay: 0.01, az: 0.98, totalAccel: 0.98, roll: 0.6, pitch: -1.7, fall: false },
+        { ax: -0.02, ay: 0.02, az: 1.00, totalAccel: 1.00, roll: 1.1, pitch: 1.1, fall: false },
+        { ax: 0.02, ay: -0.01, az: 0.98, totalAccel: 0.98, roll: -0.6, pitch: -1.2, fall: false }
+      ];
+      initSamples.forEach(s => updateDashboard(s));
+      initMQTT();
+    });
+  </script>
+</body>
+</html>
